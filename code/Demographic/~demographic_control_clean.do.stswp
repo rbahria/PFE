@@ -1,0 +1,182 @@
+/*------------------------------------------------
+	In this file I am cleaning Demographic data :
+	
+	--> Race, sex, age from US census
+	--> Education & ... from  ACS
+---------------------------------------------------
+*/
+
+ 
+ 
+*********************************************
+
+* 				Set up
+
+*********************************************
+
+clear all
+set more off
+
+
+global PATH "C:\Users\ranya\OneDrive - Alma Mater Studiorum Università di Bologna\Desktop\UNIBO\PFE\US\Work"
+global data "${PATH}/data/raw"
+global clean "${PATH}/data/clean"
+global temp "${PATH}/data/temp"
+
+cd "${PATH}"
+
+
+
+*********************************************
+
+* 				cleaning
+
+*********************************************
+
+
+
+********************************************
+* 1. 1990- 2000s US census Populations
+********************************************
+
+clear 
+*loop over files
+
+forvalues i = 90/99 {
+	
+	infix year 1-2 str fips 3-10 str age_raw 11-13 str race_sex 14 str 	ethnic 16 pop 17-30 ///
+    using "${data}/demographic_US_census/stch-icen19`i'.txt"
+	
+	gen year_full = 1900 + year
+	drop year
+	rename year_full year
+	
+	foreach v in fips age_raw race_sex ethnic {
+        replace `v' = trim(`v') //cleaning
+		}
+
+	*age groups
+	gen age_cat = ""
+    replace age_cat = "0-14"  if inlist(age_raw, "0", "1", "2", "3")
+    replace age_cat = "15-24" if inlist(age_raw, "4", "5")
+    replace age_cat = "25-39" if inlist(age_raw, "6", "7", "8")
+    replace age_cat = "40plus" if real(age_raw) >= 9 & real(age_raw) != .
+	
+	* race and gender
+//1=White M, 2=White F, 3=Black M, 4=Black F, 5=Ind M, 6=Ind F, 7=Asian M, 8=Asian F
+	gen gender = ""
+    replace gender = "male"   if inlist(race_sex, "1", "3", "5", "7")
+    replace gender = "female" if inlist(race_sex, "2", "4", "6", "8")
+	
+	gen race_grp = "nonwhite"
+    replace race_grp = "white" if inlist(race_sex, "1", "2")
+	
+	collapse (sum) pop, by(year fips age_cat gender race_grp)
+	
+	save "${temp}/demo/demo_temp_`i'.dta", replace
+    clear
+	
+	}
+	
+	
+* appending
+use "${temp}/demo/demo_temp_90.dta", clear
+	forvalues i = 91/99 {
+    append using "${temp}/demo/demo_temp_`i'.dta"
+}
+
+
+
+* 1.a) 1990- 2000s shares
+
+*total county population
+bysort fips year: egen pop_total = total(pop)
+
+*age-group pop shares
+bysort fips year age_cat: egen pop_age = total(pop)
+
+gen sh_age_0_14   = pop_age / pop_total if age_cat == "0-14"
+gen sh_age_15_24  = pop_age / pop_total if age_cat == "15-24"
+gen sh_age_25_39  = pop_age / pop_total if age_cat == "25-39"
+gen sh_age_40plus = pop_age / pop_total if age_cat == "40plus"
+
+*gender shares
+bysort fips year gender: egen pop_gender = total(pop)
+
+gen sh_female = pop_gender / pop_total if gender == "female"
+gen sh_male   = pop_gender / pop_total if gender == "male"
+	
+*race shares	
+bysort fips year race_grp: egen pop_race = total(pop)
+
+gen sh_white    = pop_race / pop_total if race_grp == "white"
+gen sh_nonwhite = pop_race / pop_total if race_grp == "nonwhite"
+
+*one row per county-year
+collapse (max) pop_total sh_age_0_14 sh_age_15_24 sh_age_25_39 sh_age_40plus ///
+               sh_female sh_male sh_white sh_nonwhite, ///
+    by(fips year)
+
+	
+*1.b) fixing fips and boundaries
+gen state_fips  = real(substr(fips, 1, 2))
+gen county_fips = real(substr(fips, 3, 3))
+
+* Oglala Lakota County, SD
+replace county_fips = 102 if county_fips == 113 & state_fips == 46
+
+* Alaska Census Areas
+replace county_fips = 198 if county_fips == 201 & state_fips == 2
+replace county_fips = 105 if county_fips == 232 & state_fips == 2
+replace county_fips = 158 if county_fips == 270 & state_fips == 2
+replace county_fips = 195 if county_fips == 280 & state_fips == 2
+
+* Virginia fixes
+replace county_fips = 19 if county_fips == 515 & state_fips == 51
+replace county_fips = 5  if county_fips == 560 & state_fips == 51
+
+*county-year level
+collapse (sum) pop_total ///
+         (mean) sh_age_0_14 sh_age_15_24 sh_age_25_39 sh_age_40plus ///
+                sh_female sh_male sh_white sh_nonwhite [aw=pop_total], ///
+         by(state_fips county_fips year)
+
+* fixing fips after boundary change
+gen fips = string(state_fips, "%02.0f") + string(county_fips, "%03.0f")
+order fips state_fips county_fips year pop_total
+
+isid fips year
+
+*checks
+	duplicates report fips year
+	* missing values
+	misstable summarize fips state_fips county_fips year pop_total ///
+    sh_age_0_14 sh_age_15_24 sh_age_25_39 sh_age_40plus ///
+    sh_female sh_male sh_white sh_nonwhite
+	
+	assert pop_total > 0
+	foreach v in sh_age_0_14 sh_age_15_24 sh_age_25_39 sh_age_40plus ///
+             sh_female sh_male sh_white sh_nonwhite {
+    assert inrange(`v', 0, 1) if !missing(`v')
+	}
+	*Check shares sum to 1
+	gen check_age = sh_age_0_14 + sh_age_15_24 + sh_age_25_39 + sh_age_40plus
+	gen check_gender = sh_female + sh_male
+	gen check_race = sh_white + sh_nonwhite
+
+
+save "${clean}/demo/demo_us_1990_2000.dta", clear
+
+
+
+
+
+
+	
+
+********************************************
+* 2. 2000- 2010s US census Populations
+********************************************
+	
+	
+	
